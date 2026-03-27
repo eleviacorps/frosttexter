@@ -35,6 +35,9 @@ EXPO_PUBLIC_SUPABASE_STORAGE_BUCKET=attachments
 EXPO_PUBLIC_INVITE_CODE=FROST-FRIENDS
 ```
 
+For the web app on Vercel, `NEXT_PUBLIC_SUPABASE_URL` and
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` are also accepted if you already have those set.
+
 For local legacy-server development you can still keep:
 
 ```bash
@@ -69,6 +72,9 @@ What this schema provides:
    - `VITE_SUPABASE_STORAGE_BUCKET`
    - `VITE_INVITE_CODE`
 4. Deploy.
+
+If your Vercel project already uses `NEXT_PUBLIC_SUPABASE_URL` and
+`NEXT_PUBLIC_SUPABASE_ANON_KEY`, the web app now accepts those too.
 
 SPA rewrites are already defined in [vercel.json](C:/PersonalDrive/Programming/WebDev/SText/apps/web/vercel.json).
 
