@@ -54,7 +54,10 @@ export const useMobileStore = create<MobileState>()(
         set((state) => ({
           session: payload.session,
           users: payload.users,
-          conversations: payload.conversations,
+          conversations: [
+            ...payload.conversations,
+            ...state.conversations.filter((conversation) => conversation.kind === "secret"),
+          ].reduce<Conversation[]>((accumulator, conversation) => upsertById(accumulator, conversation), []),
           rooms: payload.rooms,
           activeConversationId: state.activeConversationId || payload.conversations[0]?.id,
         })),

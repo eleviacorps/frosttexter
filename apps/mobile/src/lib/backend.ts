@@ -52,6 +52,22 @@ interface InviteCodeRow {
   uses?: number | null;
 }
 
+interface FollowRow {
+  follower_id: string;
+  followee_id: string;
+  status: "pending" | "accepted";
+}
+
+interface BlockRow {
+  blocker_id: string;
+  blocked_id: string;
+}
+
+interface RemovedConversationRow {
+  user_id: string;
+  conversation_id: string;
+}
+
 function toUser(row: ProfileRow): FrostUser {
   return {
     id: row.id,
@@ -69,11 +85,53 @@ function buildAuthSession(session: Session, user: FrostUser): AuthSession {
   };
 }
 
-function buildDmConversations(users: FrostUser[], currentUserId: string): Conversation[] {
+function dmConversationId(userA: string, userB: string) {
+  return ["dm", ...[userA, userB].sort()].join("_");
+}
+
+function buildRelationshipIndex(currentUserId: string, follows: FollowRow[], blocks: BlockRow[]) {
+  const accepted = new Set<string>();
+  const blocked = new Set<string>();
+  const blockedBy = new Set<string>();
+
+  follows.forEach((follow) => {
+    if (follow.status !== "accepted") {
+      return;
+    }
+
+    if (follow.follower_id === currentUserId) {
+      accepted.add(follow.followee_id);
+    } else if (follow.followee_id === currentUserId) {
+      accepted.add(follow.follower_id);
+    }
+  });
+
+  blocks.forEach((block) => {
+    if (block.blocker_id === currentUserId) {
+      blocked.add(block.blocked_id);
+    } else if (block.blocked_id === currentUserId) {
+      blockedBy.add(block.blocker_id);
+    }
+  });
+
+  return { accepted, blocked, blockedBy };
+}
+
+function buildDmConversations(
+  users: FrostUser[],
+  currentUserId: string,
+  acceptedUserIds: Set<string>,
+  removedConversationIds: Set<string>,
+): Conversation[] {
   return users
-    .filter((user) => user.id !== currentUserId)
+    .filter(
+      (user) =>
+        user.id !== currentUserId &&
+        acceptedUserIds.has(user.id) &&
+        !removedConversationIds.has(dmConversationId(currentUserId, user.id)),
+    )
     .map((user) => ({
-      id: ["dm", ...[currentUserId, user.id].sort()].join("_"),
+      id: dmConversationId(currentUserId, user.id),
       kind: "dm" as const,
       title: user.username,
       participantIds: [currentUserId, user.id],
@@ -132,28 +190,57 @@ async function ensureProfile(userId: string, email: string, username: string) {
 export async function buildBootstrapFromSession(session: Session): Promise<BootstrapPayload> {
   assertSupabaseConfigured();
 
-  const [{ data: profiles, error: profilesError }, { data: memberships, error: membershipsError }, { data: rooms, error: roomsError }] =
-    await Promise.all([
-      supabase
-        .from("profiles")
-        .select("id, email, username, avatar_url, status, created_at")
-        .order("username", { ascending: true }),
-      supabase.from("group_members").select("group_id, user_id").eq("user_id", session.user.id),
-      supabase
-        .from("rooms")
-        .select("id, code, name, topic, host_id, now_playing, read_only, is_live, updated_at")
-        .order("updated_at", { ascending: false }),
-    ]);
+  const [
+    { data: profiles, error: profilesError },
+    { data: memberships, error: membershipsError },
+    { data: rooms, error: roomsError },
+    { data: follows, error: followsError },
+    { data: blocks, error: blocksError },
+    { data: removedConversations, error: removedError },
+  ] = await Promise.all([
+    supabase
+      .from("profiles")
+      .select("id, email, username, avatar_url, status, created_at")
+      .order("username", { ascending: true }),
+    supabase.from("group_members").select("group_id, user_id").eq("user_id", session.user.id),
+    supabase
+      .from("rooms")
+      .select("id, code, name, topic, host_id, now_playing, read_only, is_live, updated_at")
+      .order("updated_at", { ascending: false }),
+    supabase
+      .from("follows")
+      .select("follower_id, followee_id, status")
+      .or(`follower_id.eq.${session.user.id},followee_id.eq.${session.user.id}`),
+    supabase
+      .from("blocks")
+      .select("blocker_id, blocked_id")
+      .or(`blocker_id.eq.${session.user.id},blocked_id.eq.${session.user.id}`),
+    supabase
+      .from("removed_conversations")
+      .select("user_id, conversation_id")
+      .eq("user_id", session.user.id),
+  ]);
 
   if (profilesError) throw new Error(profilesError.message);
   if (membershipsError) throw new Error(membershipsError.message);
   if (roomsError) throw new Error(roomsError.message);
+  if (followsError) throw new Error(followsError.message);
+  if (blocksError) throw new Error(blocksError.message);
+  if (removedError) throw new Error(removedError.message);
 
   const users = (profiles ?? []).map((row) => toUser(row as ProfileRow));
   const currentUser = users.find((user) => user.id === session.user.id);
   if (!currentUser) {
     throw new Error("Your FrostChat profile is missing.");
   }
+  const relationshipIndex = buildRelationshipIndex(
+    currentUser.id,
+    (follows ?? []) as FollowRow[],
+    (blocks ?? []) as BlockRow[],
+  );
+  const removedConversationIds = new Set(
+    ((removedConversations ?? []) as RemovedConversationRow[]).map((item) => item.conversation_id),
+  );
 
   const groupIds = (memberships ?? []).map((membership) => membership.group_id);
   const [{ data: groups, error: groupsError }, { data: allGroupMembers, error: membersError }, { data: roomMembers, error: roomMembersError }] =
@@ -195,7 +282,15 @@ export async function buildBootstrapFromSession(session: Session): Promise<Boots
         description: group.description ?? undefined,
         updatedAt: group.updated_at,
       })),
-      ...buildDmConversations(users, currentUser.id),
+      ...buildDmConversations(
+        users.filter(
+          (user) =>
+            !relationshipIndex.blocked.has(user.id) && !relationshipIndex.blockedBy.has(user.id),
+        ),
+        currentUser.id,
+        relationshipIndex.accepted,
+        removedConversationIds,
+      ),
     ],
     rooms: ((rooms ?? []) as RoomRow[]).map((room) => ({
       id: room.id,

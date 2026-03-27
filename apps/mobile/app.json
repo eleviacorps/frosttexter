@@ -5,7 +5,10 @@
     "scheme": "frostchat",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
     "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
       "backgroundColor": "#070a16"
     },
     "assetBundlePatterns": [
@@ -15,8 +18,11 @@
       "supportsTablet": true
     },
     "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#070a16"
+      },
       "package": "com.frostchat.app"
     }
   }
 }
-

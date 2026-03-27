@@ -496,10 +496,10 @@ function SecretScreen() {
     return (
       <Surface style={styles.stackPanel}>
         <Text style={styles.sectionTitle}>Secret Vault</Text>
-        <Text style={styles.panelMeta}>{secretPin ? "Enter your PIN or use biometrics." : "Create a vault PIN for hidden chats."}</Text>
+        <Text style={styles.panelMeta}>{secretPin ? "Enter your PIN or use biometrics." : "Use the default pass 111222 to reveal the hidden layer for the first time."}</Text>
         <TextInput value={pin} onChangeText={setPin} secureTextEntry placeholder="Vault PIN" placeholderTextColor={c.faint} style={styles.input} />
-        <Pressable style={styles.primaryButton} onPress={() => { if (!secretPin) setSecretPin(pin); else if (!unlockSecret(pin)) Alert.alert("Incorrect PIN", "Try again."); setPin(""); }}>
-          <Text style={styles.primaryButtonLabel}>{secretPin ? "Unlock Vault" : "Create PIN"}</Text>
+        <Pressable style={styles.primaryButton} onPress={() => { if (!secretPin) { if (pin === "111222") setSecretPin("111222"); else Alert.alert("Incorrect pass", "Use 111222 the first time."); } else if (!unlockSecret(pin)) Alert.alert("Incorrect PIN", "Try again."); setPin(""); }}>
+          <Text style={styles.primaryButtonLabel}>{secretPin ? "Unlock Vault" : "Reveal Hidden Layer"}</Text>
         </Pressable>
         {secretPin ? <Pressable style={styles.secondaryButton} onPress={() => void unlockWithBiometrics()}><Text style={styles.secondaryButtonLabel}>Use biometrics</Text></Pressable> : null}
       </Surface>
@@ -514,6 +514,10 @@ function SecretScreen() {
           <Pressable style={styles.secondaryPill} onPress={lockSecret}><Text style={styles.secondaryPillText}>Lock</Text></Pressable>
         </View>
         <Text style={styles.panelMeta}>Encrypted locally with your shared PIN.</Text>
+        <TextInput value={pin} onChangeText={setPin} placeholder="Change local pass" placeholderTextColor={c.faint} style={styles.input} />
+        <Pressable style={styles.secondaryButton} onPress={() => { if (!pin.trim()) return; setSecretPin(pin.trim()); setPin(""); }}>
+          <Text style={styles.secondaryButtonLabel}>Save vault pass</Text>
+        </Pressable>
         <TextInput value={name} onChangeText={setName} placeholder="Secret chat name" placeholderTextColor={c.faint} style={styles.input} />
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rowGap}>
           {users.filter((user) => user.id !== session?.user.id).map((user) => (
