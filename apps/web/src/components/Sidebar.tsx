@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   Camera,
@@ -19,6 +19,9 @@ import { getConversationTitle } from "@frostchat/shared";
 import { api } from "@/lib/api";
 import { uploadAttachment } from "@/lib/media";
 import { useAppStore } from "@/store/useAppStore";
+
+import { HiddenVaultEntryDialog } from "./HiddenVaultEntryDialog";
+import { PeopleDialog } from "./PeopleDialog";
 
 function initials(name: string) {
   return name
@@ -216,6 +219,9 @@ export function Sidebar({ onCreateGroup }: { onCreateGroup: () => void }) {
   const location = useLocation();
   const navigate = useNavigate();
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
+  const [peopleDialogOpen, setPeopleDialogOpen] = useState(false);
+  const [hiddenVaultOpen, setHiddenVaultOpen] = useState(false);
+  const logoTapRef = useRef<number[]>([]);
   const {
     session,
     users,
@@ -247,13 +253,24 @@ export function Sidebar({ onCreateGroup }: { onCreateGroup: () => void }) {
     <div className="flex h-full min-h-0 bg-transparent">
       <div className="surface-divider flex w-[76px] shrink-0 flex-col items-center justify-between px-3 py-5">
         <div className="flex w-full flex-col items-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-[#d5f575] text-sm font-semibold text-black">
+          <button
+            type="button"
+            onClick={() => {
+              const now = Date.now();
+              logoTapRef.current = [...logoTapRef.current.filter((stamp) => now - stamp < 900), now];
+              if (logoTapRef.current.length >= 3) {
+                logoTapRef.current = [];
+                setHiddenVaultOpen(true);
+              }
+            }}
+            className="grid h-11 w-11 place-items-center rounded-2xl bg-[#d5f575] text-sm font-semibold text-black"
+            title="FrostChat"
+          >
             F
-          </div>
+          </button>
           {[
             { to: "/chat", icon: MessageSquareMore, label: "Chats" },
             { to: "/rooms", icon: Waves, label: "Rooms" },
-            { to: "/secret", icon: LockKeyhole, label: "Secret" },
           ].map((item) => {
             const active = location.pathname.startsWith(item.to);
             return (
@@ -295,10 +312,14 @@ export function Sidebar({ onCreateGroup }: { onCreateGroup: () => void }) {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 rounded-2xl border border-[#1a2336] bg-[#111214] px-3 py-3 text-sm text-white/42">
+        <button
+          type="button"
+          onClick={() => setPeopleDialogOpen(true)}
+          className="flex items-center gap-2 rounded-2xl border border-[#1a2336] bg-[#111214] px-3 py-3 text-sm text-white/42 transition hover:border-[#24304b] hover:text-white"
+        >
           <Search size={16} className="text-white/32" />
-          Search conversations
-        </div>
+          Search people and conversations
+        </button>
 
         <div className="mt-5 flex items-center justify-between">
           <p className="text-xs uppercase tracking-[0.28em] text-white/30">Recent chats</p>
@@ -402,6 +423,8 @@ export function Sidebar({ onCreateGroup }: { onCreateGroup: () => void }) {
         </button>
 
         <AccountDetailsDialog open={accountDialogOpen} onClose={() => setAccountDialogOpen(false)} />
+        <PeopleDialog open={peopleDialogOpen} onClose={() => setPeopleDialogOpen(false)} />
+        <HiddenVaultEntryDialog open={hiddenVaultOpen} onClose={() => setHiddenVaultOpen(false)} />
       </div>
     </div>
   );

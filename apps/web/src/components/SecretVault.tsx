@@ -49,6 +49,7 @@ export function SecretVault() {
   const [pinInput, setPinInput] = useState("");
   const [composeTitle, setComposeTitle] = useState("");
   const [selectedUserId, setSelectedUserId] = useState("");
+  const [nextPin, setNextPin] = useState("");
 
   useEffect(() => {
     const onBlur = () => showSecretWarning(true);
@@ -79,7 +80,7 @@ export function SecretVault() {
           <p className="mt-3 text-white/55">
             {secretPin
               ? "Enter your vault PIN to reveal encrypted chats."
-              : "Create a vault PIN. Friends need the same shared PIN to decrypt relayed secret chats."}
+              : "Enter the default workspace code to reveal the hidden layer for the first time."}
           </p>
           <input
             type="password"
@@ -92,8 +93,10 @@ export function SecretVault() {
             type="button"
             onClick={() => {
               if (!secretPin) {
-                setSecretPin(pinInput);
-                setPinInput("");
+                if (pinInput.trim() === "111222") {
+                  setSecretPin("111222");
+                  setPinInput("");
+                }
                 return;
               }
               if (unlockSecret(pinInput)) {
@@ -102,7 +105,7 @@ export function SecretVault() {
             }}
             className="mt-4 rounded-2xl bg-[linear-gradient(135deg,#5da6ff,#7c83ff)] px-5 py-3 font-medium text-white"
           >
-            {secretPin ? "Unlock Secret Chats" : "Create Secret PIN"}
+            {secretPin ? "Unlock Secret Chats" : "Reveal Hidden Layer"}
           </button>
         </FrostPanel>
       </div>
@@ -166,6 +169,27 @@ export function SecretVault() {
           >
             <Sparkles size={16} />
             Create Hidden Chat
+          </button>
+        </div>
+
+        <div className="mt-4 rounded-[24px] border border-white/8 bg-black/20 p-4">
+          <p className="text-sm text-white/65">Change access code</p>
+          <input
+            value={nextPin}
+            onChange={(event) => setNextPin(event.target.value)}
+            placeholder="New local passcode"
+            className="mt-3 w-full rounded-2xl border border-white/10 bg-white/8 px-4 py-3 text-sm text-white outline-none"
+          />
+          <button
+            type="button"
+            disabled={!nextPin.trim()}
+            onClick={() => {
+              setSecretPin(nextPin.trim());
+              setNextPin("");
+            }}
+            className="mt-3 w-full rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm font-medium text-white disabled:opacity-50"
+          >
+            Save access code
           </button>
         </div>
 

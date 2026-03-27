@@ -69,6 +69,11 @@ interface AppState {
   lockSecret: () => void;
   showSecretWarning: (visible: boolean) => void;
   createSecretConversation: (title: string, participantIds: string[]) => Conversation;
+  moveConversationToSecret: (input: {
+    sourceConversationId: string;
+    title: string;
+    participantIds: string[];
+  }) => Conversation | undefined;
   createOutgoingMessage: (input: {
     conversation: { id: string; kind: ChatKind };
     body: string;
@@ -109,12 +114,15 @@ export const useAppStore = create<AppState>()(
           session: payload.session,
           users: payload.users,
           conversations: sortConversations(
-            payload.conversations.map((conversation) => ({
-              ...conversation,
-              lastMessagePreview: state.messagesByConversation[conversation.id]?.[0]
-                ? summarizeMessage(state.messagesByConversation[conversation.id][0])
-                : conversation.lastMessagePreview,
-            })),
+            [
+              ...payload.conversations.map((conversation) => ({
+                ...conversation,
+                lastMessagePreview: state.messagesByConversation[conversation.id]?.[0]
+                  ? summarizeMessage(state.messagesByConversation[conversation.id][0])
+                  : conversation.lastMessagePreview,
+              })),
+              ...state.conversations.filter((conversation) => conversation.kind === "secret"),
+            ].reduce<Conversation[]>((accumulator, conversation) => upsertById(accumulator, conversation), []),
             state.messagesByConversation,
           ),
           rooms: payload.rooms,
@@ -310,6 +318,59 @@ export const useAppStore = create<AppState>()(
             state.messagesByConversation,
           ),
         }));
+        return conversation;
+      },
+      moveConversationToSecret: ({ sourceConversationId, title, participantIds }) => {
+        const state = get();
+        const sourceMessages = state.messagesByConversation[sourceConversationId] ?? [];
+        const pin = state.secretPin ?? "111222";
+        const conversation = {
+          id: createEntityId("secret"),
+          kind: "secret" as const,
+          title,
+          participantIds,
+          hidden: true,
+          secretLocked: true,
+          updatedAt: new Date().toISOString(),
+        } satisfies Conversation;
+
+        const migratedMessages = [...sourceMessages]
+          .reverse()
+          .map((message) => {
+            const decryptedBody = message.kind === "secret" ? state.readSecretMessage(sourceConversationId, message.id) : message.body;
+            const body =
+              decryptedBody && !message.deletedForEveryone
+                ? JSON.stringify(encryptSecretText(decryptedBody, pin))
+                : message.body;
+
+            return {
+              ...message,
+              id: createEntityId("msg"),
+              conversationId: conversation.id,
+              kind: "secret" as const,
+              body,
+              isSecret: true,
+            } satisfies ChatMessage;
+          })
+          .reverse();
+
+        set((current) => ({
+          secretPin: current.secretPin ?? pin,
+          secretUnlocked: current.secretUnlocked || !current.secretPin,
+          conversations: sortConversations(
+            [conversation, ...current.conversations],
+            {
+              ...current.messagesByConversation,
+              [conversation.id]: migratedMessages,
+            },
+          ),
+          messagesByConversation: {
+            ...current.messagesByConversation,
+            [conversation.id]: migratedMessages,
+          },
+          activeConversationId: conversation.id,
+        }));
+
         return conversation;
       },
       createOutgoingMessage: ({ conversation, body, attachments, replyToId, selfDestructSeconds }) => {

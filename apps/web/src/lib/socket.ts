@@ -196,6 +196,56 @@ async function attachBootstrapRefresh(session: AuthSession, handlers: SocketHand
     .on("postgres_changes", { event: "*", schema: "public", table: "groups" }, () =>
       handlers.onBootstrapDataChanged(),
     )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "follows",
+        filter: `follower_id=eq.${session.user.id}`,
+      },
+      () => handlers.onBootstrapDataChanged(),
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "follows",
+        filter: `followee_id=eq.${session.user.id}`,
+      },
+      () => handlers.onBootstrapDataChanged(),
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "blocks",
+        filter: `blocker_id=eq.${session.user.id}`,
+      },
+      () => handlers.onBootstrapDataChanged(),
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "blocks",
+        filter: `blocked_id=eq.${session.user.id}`,
+      },
+      () => handlers.onBootstrapDataChanged(),
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "removed_conversations",
+        filter: `user_id=eq.${session.user.id}`,
+      },
+      () => handlers.onBootstrapDataChanged(),
+    )
     .subscribe();
 }
 

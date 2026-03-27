@@ -20,6 +20,18 @@ export interface FrostUser {
   lastSeenAt?: string;
 }
 
+export type FollowState =
+  | "none"
+  | "outgoing_pending"
+  | "incoming_pending"
+  | "accepted"
+  | "blocked"
+  | "blocked_by";
+
+export interface DiscoveryProfile extends FrostUser {
+  relationship: FollowState;
+}
+
 export interface Reaction {
   emoji: string;
   userIds: string[];

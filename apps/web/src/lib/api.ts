@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   Conversation,
   DeleteEvent,
+  DiscoveryProfile,
   FrostUser,
   LiveRoom,
   ReactionEvent,
@@ -45,6 +46,41 @@ export const api = {
     payload: { username: string; status?: string; avatarUrl?: string },
   ): Promise<FrostUser> {
     return backend.updateProfile(session, payload);
+  },
+  socialGraph(session: AuthSession): Promise<{
+    connections: DiscoveryProfile[];
+    incomingRequests: DiscoveryProfile[];
+    outgoingRequests: DiscoveryProfile[];
+    blockedProfiles: DiscoveryProfile[];
+  }> {
+    return backend.socialGraph(session);
+  },
+  searchProfiles(session: AuthSession, query: string): Promise<DiscoveryProfile[]> {
+    return backend.searchProfiles(session, query);
+  },
+  sendFollowRequest(session: AuthSession, targetUserId: string): Promise<DiscoveryProfile> {
+    return backend.sendFollowRequest(session, targetUserId);
+  },
+  acceptFollowRequest(session: AuthSession, targetUserId: string): Promise<DiscoveryProfile> {
+    return backend.acceptFollowRequest(session, targetUserId);
+  },
+  declineFollowRequest(session: AuthSession, targetUserId: string) {
+    return backend.declineFollowRequest(session, targetUserId);
+  },
+  removeConnection(session: AuthSession, targetUserId: string) {
+    return backend.removeConnection(session, targetUserId);
+  },
+  blockUser(session: AuthSession, targetUserId: string): Promise<DiscoveryProfile> {
+    return backend.blockUser(session, targetUserId);
+  },
+  unblockUser(session: AuthSession, targetUserId: string): Promise<DiscoveryProfile> {
+    return backend.unblockUser(session, targetUserId);
+  },
+  removeConversation(session: AuthSession, conversationId: string) {
+    return backend.removeConversation(session, conversationId);
+  },
+  restoreConversation(session: AuthSession, conversationId: string) {
+    return backend.restoreConversation(session, conversationId);
   },
   createGroup(
     session: AuthSession,

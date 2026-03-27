@@ -17,6 +17,7 @@ import {
   UserMinus,
   Video,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 import type { ChatMessage, Conversation, FrostUser } from "@frostchat/shared";
 import { groupMessagesByDate } from "@frostchat/shared";
@@ -618,6 +619,130 @@ function GroupManagementCard({
   );
 }
 
+function DirectMessageControls({
+  conversation,
+  otherUser,
+}: {
+  conversation: Conversation;
+  otherUser?: FrostUser;
+}) {
+  const navigate = useNavigate();
+  const session = useAppStore((state) => state.session);
+  const hydrate = useAppStore((state) => state.hydrate);
+  const setActiveConversation = useAppStore((state) => state.setActiveConversation);
+  const moveConversationToSecret = useAppStore((state) => state.moveConversationToSecret);
+  const [working, setWorking] = useState<"remove" | "vault" | "block" | undefined>();
+  const [error, setError] = useState<string>();
+
+  if (!otherUser || !session) {
+    return null;
+  }
+  const currentSession = session;
+
+  async function refreshAfterChange(nextPath = "/chat", nextConversationId?: string) {
+    const bootstrap = await api.me(currentSession.token, currentSession.refreshToken);
+    hydrate(bootstrap);
+    setActiveConversation(nextConversationId);
+    navigate(nextPath);
+  }
+
+  return (
+    <section className="rounded-[24px] border border-[#1a2336] bg-[#111215] p-4">
+      <div className="mb-4 flex items-center gap-2">
+        <LockKeyhole size={15} className="text-[#dce9a6]" />
+        <p className="text-sm font-medium text-white">Direct message controls</p>
+      </div>
+
+      <div className="space-y-3">
+        <button
+          type="button"
+          disabled={Boolean(working)}
+          onClick={async () => {
+            try {
+              setWorking("vault");
+              setError(undefined);
+              const secretConversation = moveConversationToSecret({
+                sourceConversationId: conversation.id,
+                title: otherUser.username,
+                participantIds: conversation.participantIds,
+              });
+              await api.removeConversation(currentSession, conversation.id);
+              await refreshAfterChange("/secret", secretConversation?.id);
+            } catch (caught) {
+              setError(caught instanceof Error ? caught.message : "Unable to move this chat");
+            } finally {
+              setWorking(undefined);
+            }
+          }}
+          className="flex w-full items-center justify-between rounded-[20px] border border-[#1a2336] bg-[#0f1114] px-4 py-3 text-left disabled:opacity-50"
+        >
+          <div>
+            <p className="text-sm font-medium text-white">Move to hidden layer</p>
+            <p className="mt-1 text-xs text-white/42">
+              Creates a local secret copy and removes this DM from your inbox.
+            </p>
+          </div>
+          <span className="text-xs text-[#dce9a6]">{working === "vault" ? "Moving..." : "Hide"}</span>
+        </button>
+
+        <button
+          type="button"
+          disabled={Boolean(working)}
+          onClick={async () => {
+            try {
+              setWorking("remove");
+              setError(undefined);
+              await api.removeConversation(currentSession, conversation.id);
+              await refreshAfterChange("/chat");
+            } catch (caught) {
+              setError(caught instanceof Error ? caught.message : "Unable to remove this DM");
+            } finally {
+              setWorking(undefined);
+            }
+          }}
+          className="flex w-full items-center justify-between rounded-[20px] border border-[#1a2336] bg-[#0f1114] px-4 py-3 text-left disabled:opacity-50"
+        >
+          <div>
+            <p className="text-sm font-medium text-white">Remove from inbox</p>
+            <p className="mt-1 text-xs text-white/42">
+              Hides this DM for you until you reopen it from the People panel.
+            </p>
+          </div>
+          <span className="text-xs text-white/56">{working === "remove" ? "Removing..." : "Remove"}</span>
+        </button>
+
+        <button
+          type="button"
+          disabled={Boolean(working)}
+          onClick={async () => {
+            try {
+              setWorking("block");
+              setError(undefined);
+              await api.blockUser(currentSession, otherUser.id);
+              await refreshAfterChange("/chat");
+            } catch (caught) {
+              setError(caught instanceof Error ? caught.message : "Unable to block this profile");
+            } finally {
+              setWorking(undefined);
+            }
+          }}
+          className="flex w-full items-center justify-between rounded-[20px] border border-rose-300/18 bg-rose-500/8 px-4 py-3 text-left disabled:opacity-50"
+        >
+          <div>
+            <p className="text-sm font-medium text-rose-50">Block profile</p>
+            <p className="mt-1 text-xs text-rose-100/58">
+              Removes the connection, hides the DM, and blocks new contact from this account.
+            </p>
+          </div>
+          <span className="text-xs text-rose-100/78">{working === "block" ? "Blocking..." : "Block"}</span>
+        </button>
+      </div>
+
+      {error ? <p className="mt-4 text-sm text-rose-300">{error}</p> : null}
+    </section>
+  );
+}
+
 function DetailsPane({
   conversation,
   messages,
@@ -639,6 +764,10 @@ function DetailsPane({
   const sharedAttachments = messages
     .flatMap((message) => message.attachments ?? [])
     .slice(0, 6);
+  const otherUser =
+    conversation.kind === "dm"
+      ? participants.find((user) => user.id !== session?.user.id)
+      : undefined;
 
   return (
     <aside className="flex h-full w-full flex-col">
@@ -725,6 +854,10 @@ function DetailsPane({
 
         {conversation.kind === "group" ? (
           <GroupManagementCard conversation={conversation} participants={participants} />
+        ) : null}
+
+        {conversation.kind === "dm" ? (
+          <DirectMessageControls conversation={conversation} otherUser={otherUser} />
         ) : null}
 
         <section className="rounded-[24px] border border-[#1a2336] bg-[#111215] p-4">

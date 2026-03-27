@@ -2,6 +2,7 @@ import type {
   AuthSession,
   BootstrapPayload,
   Conversation,
+  DiscoveryProfile,
   FrostUser,
   LiveRoom,
   ChatMessage,
@@ -62,6 +63,26 @@ interface InviteCodeRow {
   expires_at?: string | null;
   max_uses?: number | null;
   uses?: number | null;
+}
+
+interface FollowRow {
+  follower_id: string;
+  followee_id: string;
+  status: "pending" | "accepted";
+  created_at: string;
+  responded_at?: string | null;
+}
+
+interface BlockRow {
+  blocker_id: string;
+  blocked_id: string;
+  created_at: string;
+}
+
+interface RemovedConversationRow {
+  user_id: string;
+  conversation_id: string;
+  created_at: string;
 }
 
 interface MessageRow {
@@ -133,6 +154,76 @@ function uniqueIds(ids: string[]) {
   return Array.from(new Set(ids.filter(Boolean)));
 }
 
+function dmConversationId(userA: string, userB: string) {
+  return ["dm", ...[userA, userB].sort()].join("_");
+}
+
+function buildRelationshipIndex(
+  currentUserId: string,
+  follows: FollowRow[],
+  blocks: BlockRow[],
+) {
+  const outgoingPending = new Set<string>();
+  const incomingPending = new Set<string>();
+  const accepted = new Set<string>();
+  const blocked = new Set<string>();
+  const blockedBy = new Set<string>();
+
+  follows.forEach((follow) => {
+    const otherUserId =
+      follow.follower_id === currentUserId ? follow.followee_id : follow.follower_id;
+
+    if (follow.status === "accepted") {
+      accepted.add(otherUserId);
+      return;
+    }
+
+    if (follow.follower_id === currentUserId) {
+      outgoingPending.add(otherUserId);
+    } else if (follow.followee_id === currentUserId) {
+      incomingPending.add(otherUserId);
+    }
+  });
+
+  blocks.forEach((block) => {
+    if (block.blocker_id === currentUserId) {
+      blocked.add(block.blocked_id);
+    } else if (block.blocked_id === currentUserId) {
+      blockedBy.add(block.blocker_id);
+    }
+  });
+
+  return {
+    accepted,
+    outgoingPending,
+    incomingPending,
+    blocked,
+    blockedBy,
+  };
+}
+
+function relationshipForUser(
+  userId: string,
+  index: ReturnType<typeof buildRelationshipIndex>,
+): DiscoveryProfile["relationship"] {
+  if (index.blocked.has(userId)) {
+    return "blocked";
+  }
+  if (index.blockedBy.has(userId)) {
+    return "blocked_by";
+  }
+  if (index.accepted.has(userId)) {
+    return "accepted";
+  }
+  if (index.outgoingPending.has(userId)) {
+    return "outgoing_pending";
+  }
+  if (index.incomingPending.has(userId)) {
+    return "incoming_pending";
+  }
+  return "none";
+}
+
 function toConversation(group: GroupRow, members: GroupMemberRow[]): Conversation {
   return {
     id: group.id,
@@ -146,11 +237,17 @@ function toConversation(group: GroupRow, members: GroupMemberRow[]): Conversatio
   };
 }
 
-function buildDmConversations(users: FrostUser[], currentUserId: string): Conversation[] {
+function buildDmConversations(
+  users: FrostUser[],
+  currentUserId: string,
+  acceptedUserIds: Set<string>,
+  removedConversationIds: Set<string>,
+): Conversation[] {
   return users
-    .filter((user) => user.id !== currentUserId)
+    .filter((user) => user.id !== currentUserId && acceptedUserIds.has(user.id))
+    .filter((user) => !removedConversationIds.has(dmConversationId(currentUserId, user.id)))
     .map((user) => ({
-      id: ["dm", ...[currentUserId, user.id].sort()].join("_"),
+      id: dmConversationId(currentUserId, user.id),
       kind: "dm" as const,
       title: user.username,
       participantIds: [currentUserId, user.id],
@@ -225,6 +322,64 @@ async function fetchProfile(userId: string) {
   }
 
   return toUser(data);
+}
+
+async function fetchAllProfiles() {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, email, username, avatar_url, status, created_at")
+    .order("username", { ascending: true });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => toUser(row as ProfileRow));
+}
+
+async function fetchRelationshipRows(currentUserId: string) {
+  const [followsResponse, blocksResponse] = await Promise.all([
+    supabase
+      .from("follows")
+      .select("follower_id, followee_id, status, created_at, responded_at")
+      .or(`follower_id.eq.${currentUserId},followee_id.eq.${currentUserId}`),
+    supabase
+      .from("blocks")
+      .select("blocker_id, blocked_id, created_at")
+      .or(`blocker_id.eq.${currentUserId},blocked_id.eq.${currentUserId}`),
+  ]);
+
+  if (followsResponse.error) {
+    throw new Error(followsResponse.error.message);
+  }
+  if (blocksResponse.error) {
+    throw new Error(blocksResponse.error.message);
+  }
+
+  return {
+    follows: (followsResponse.data ?? []) as FollowRow[],
+    blocks: (blocksResponse.data ?? []) as BlockRow[],
+  };
+}
+
+async function buildDiscoveryData(currentUserId: string) {
+  const [users, { follows, blocks }] = await Promise.all([
+    fetchAllProfiles(),
+    fetchRelationshipRows(currentUserId),
+  ]);
+  const relationshipIndex = buildRelationshipIndex(currentUserId, follows, blocks);
+
+  const profiles = users
+    .filter((user) => user.id !== currentUserId)
+    .map((user) => ({
+      ...user,
+      relationship: relationshipForUser(user.id, relationshipIndex),
+    })) satisfies DiscoveryProfile[];
+
+  return {
+    profiles,
+    relationshipIndex,
+  };
 }
 
 async function fetchMessages(session: AuthSession, conversationId: string) {
@@ -434,21 +589,31 @@ async function updateStoredDelete(payload: DeleteEvent) {
 export async function buildBootstrapFromSession(session: Session): Promise<BootstrapPayload> {
   assertSupabaseConfigured();
 
-  const [{ data: profiles, error: profilesError }, { data: memberships, error: membershipsError }, { data: rooms, error: roomsError }] =
-    await Promise.all([
-      supabase
-        .from("profiles")
-        .select("id, email, username, avatar_url, status, created_at")
-        .order("username", { ascending: true }),
-      supabase
-        .from("group_members")
-        .select("group_id, user_id, muted, joined_at")
-        .eq("user_id", session.user.id),
-      supabase
-        .from("rooms")
-        .select("id, code, name, topic, host_id, now_playing, read_only, is_live, updated_at")
-        .order("updated_at", { ascending: false }),
-    ]);
+  const [
+    { data: profiles, error: profilesError },
+    { data: memberships, error: membershipsError },
+    { data: rooms, error: roomsError },
+    { follows, blocks },
+    { data: removedConversations, error: removedConversationsError },
+  ] = await Promise.all([
+    supabase
+      .from("profiles")
+      .select("id, email, username, avatar_url, status, created_at")
+      .order("username", { ascending: true }),
+    supabase
+      .from("group_members")
+      .select("group_id, user_id, muted, joined_at")
+      .eq("user_id", session.user.id),
+    supabase
+      .from("rooms")
+      .select("id, code, name, topic, host_id, now_playing, read_only, is_live, updated_at")
+      .order("updated_at", { ascending: false }),
+    fetchRelationshipRows(session.user.id),
+    supabase
+      .from("removed_conversations")
+      .select("user_id, conversation_id, created_at")
+      .eq("user_id", session.user.id),
+  ]);
 
   if (profilesError) {
     throw new Error(profilesError.message);
@@ -459,12 +624,19 @@ export async function buildBootstrapFromSession(session: Session): Promise<Boots
   if (roomsError) {
     throw new Error(roomsError.message);
   }
+  if (removedConversationsError) {
+    throw new Error(removedConversationsError.message);
+  }
 
   const users = (profiles ?? []).map((row) => toUser(row as ProfileRow));
   const currentUser = users.find((user) => user.id === session.user.id);
   if (!currentUser) {
     throw new Error("Your FrostChat profile is missing.");
   }
+  const relationshipIndex = buildRelationshipIndex(currentUser.id, follows, blocks);
+  const removedConversationIds = new Set(
+    ((removedConversations ?? []) as RemovedConversationRow[]).map((row) => row.conversation_id),
+  );
 
   const groupIds = (memberships ?? []).map((membership) => membership.group_id);
   const [{ data: groupRows, error: groupsError }, { data: allGroupMembers, error: allGroupMembersError }, { data: roomMembers, error: roomMembersError }] =
@@ -506,7 +678,7 @@ export async function buildBootstrapFromSession(session: Session): Promise<Boots
         ((allGroupMembers ?? []) as GroupMemberRow[]).filter((member) => member.group_id === group.id),
       ),
     ),
-    ...buildDmConversations(users, currentUser.id),
+    ...buildDmConversations(users, currentUser.id, relationshipIndex.accepted, removedConversationIds),
   ];
 
   const liveRooms: LiveRoom[] = ((rooms ?? []) as RoomRow[]).map((room) => ({
@@ -677,6 +849,201 @@ export const backend = {
     }
 
     return toUser(data);
+  },
+  async socialGraph(session: AuthSession) {
+    const { profiles } = await buildDiscoveryData(session.user.id);
+    return {
+      connections: profiles.filter((profile) => profile.relationship === "accepted"),
+      incomingRequests: profiles.filter((profile) => profile.relationship === "incoming_pending"),
+      outgoingRequests: profiles.filter((profile) => profile.relationship === "outgoing_pending"),
+      blockedProfiles: profiles.filter((profile) => profile.relationship === "blocked"),
+    };
+  },
+  async searchProfiles(session: AuthSession, query: string) {
+    const trimmed = query.trim().toLowerCase();
+    if (!trimmed) {
+      return [];
+    }
+
+    const { profiles } = await buildDiscoveryData(session.user.id);
+    return profiles
+      .filter((profile) => profile.username.toLowerCase().includes(trimmed))
+      .filter((profile) => profile.relationship !== "blocked_by")
+      .slice(0, 20);
+  },
+  async sendFollowRequest(session: AuthSession, targetUserId: string) {
+    if (targetUserId === session.user.id) {
+      throw new Error("You cannot follow yourself.");
+    }
+
+    const [{ follows, blocks }, targetProfile] = await Promise.all([
+      fetchRelationshipRows(session.user.id),
+      fetchProfile(targetUserId),
+    ]);
+    const relationship = relationshipForUser(
+      targetUserId,
+      buildRelationshipIndex(session.user.id, follows, blocks),
+    );
+
+    if (relationship === "blocked" || relationship === "blocked_by") {
+      throw new Error("This profile is not available.");
+    }
+    if (relationship === "accepted") {
+      return { ...targetProfile, relationship } satisfies DiscoveryProfile;
+    }
+    if (relationship === "incoming_pending") {
+      const { error } = await supabase
+        .from("follows")
+        .update({
+          status: "accepted",
+          responded_at: new Date().toISOString(),
+        })
+        .eq("follower_id", targetUserId)
+        .eq("followee_id", session.user.id);
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      return { ...targetProfile, relationship: "accepted" } satisfies DiscoveryProfile;
+    }
+
+    const { error } = await supabase.from("follows").upsert(
+      {
+        follower_id: session.user.id,
+        followee_id: targetUserId,
+        status: "pending",
+        created_at: new Date().toISOString(),
+        responded_at: null,
+      },
+      { onConflict: "follower_id,followee_id" },
+    );
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return { ...targetProfile, relationship: "outgoing_pending" } satisfies DiscoveryProfile;
+  },
+  async acceptFollowRequest(session: AuthSession, targetUserId: string) {
+    const { error } = await supabase
+      .from("follows")
+      .update({
+        status: "accepted",
+        responded_at: new Date().toISOString(),
+      })
+      .eq("follower_id", targetUserId)
+      .eq("followee_id", session.user.id);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return { ...(await fetchProfile(targetUserId)), relationship: "accepted" } satisfies DiscoveryProfile;
+  },
+  async declineFollowRequest(session: AuthSession, targetUserId: string) {
+    const { error } = await supabase
+      .from("follows")
+      .delete()
+      .eq("follower_id", targetUserId)
+      .eq("followee_id", session.user.id);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+  },
+  async removeConnection(session: AuthSession, targetUserId: string) {
+    const { error } = await supabase
+      .from("follows")
+      .delete()
+      .or(
+        `and(follower_id.eq.${session.user.id},followee_id.eq.${targetUserId}),and(follower_id.eq.${targetUserId},followee_id.eq.${session.user.id})`,
+      );
+
+    if (error) {
+      throw new Error(error.message);
+    }
+  },
+  async blockUser(session: AuthSession, targetUserId: string) {
+    if (targetUserId === session.user.id) {
+      throw new Error("You cannot block yourself.");
+    }
+
+    const now = new Date().toISOString();
+    const [blockResponse, followsDelete, removedInsert] = await Promise.all([
+      supabase.from("blocks").upsert(
+        {
+          blocker_id: session.user.id,
+          blocked_id: targetUserId,
+          created_at: now,
+        },
+        { onConflict: "blocker_id,blocked_id" },
+      ),
+      supabase
+        .from("follows")
+        .delete()
+        .or(
+          `and(follower_id.eq.${session.user.id},followee_id.eq.${targetUserId}),and(follower_id.eq.${targetUserId},followee_id.eq.${session.user.id})`,
+        ),
+      supabase.from("removed_conversations").upsert(
+        {
+          user_id: session.user.id,
+          conversation_id: dmConversationId(session.user.id, targetUserId),
+          created_at: now,
+        },
+        { onConflict: "user_id,conversation_id" },
+      ),
+    ]);
+
+    if (blockResponse.error) {
+      throw new Error(blockResponse.error.message);
+    }
+    if (followsDelete.error) {
+      throw new Error(followsDelete.error.message);
+    }
+    if (removedInsert.error) {
+      throw new Error(removedInsert.error.message);
+    }
+
+    return { ...(await fetchProfile(targetUserId)), relationship: "blocked" } satisfies DiscoveryProfile;
+  },
+  async unblockUser(session: AuthSession, targetUserId: string) {
+    const { error } = await supabase
+      .from("blocks")
+      .delete()
+      .eq("blocker_id", session.user.id)
+      .eq("blocked_id", targetUserId);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return { ...(await fetchProfile(targetUserId)), relationship: "none" } satisfies DiscoveryProfile;
+  },
+  async removeConversation(session: AuthSession, conversationId: string) {
+    const { error } = await supabase.from("removed_conversations").upsert(
+      {
+        user_id: session.user.id,
+        conversation_id: conversationId,
+        created_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,conversation_id" },
+    );
+
+    if (error) {
+      throw new Error(error.message);
+    }
+  },
+  async restoreConversation(session: AuthSession, conversationId: string) {
+    const { error } = await supabase
+      .from("removed_conversations")
+      .delete()
+      .eq("user_id", session.user.id)
+      .eq("conversation_id", conversationId);
+
+    if (error) {
+      throw new Error(error.message);
+    }
   },
   async updateGroup(
     _session: AuthSession,
