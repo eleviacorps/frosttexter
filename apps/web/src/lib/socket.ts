@@ -15,6 +15,7 @@ type SocketHandlers = {
   onConnect: () => void;
   onDisconnect: () => void;
   onPresence: (userIds: string[]) => void;
+  onBootstrapDataChanged: () => void;
   onMessage: (message: ChatMessage) => void;
   onMessageStatus: (payload: {
     conversationId: string;
@@ -41,6 +42,7 @@ let currentHandlers: SocketHandlers | null = null;
 let presenceChannel: RealtimeChannel | null = null;
 let activeRoomPresenceChannel: RealtimeChannel | null = null;
 let activeRoomId: string | null = null;
+let bootstrapChannel: RealtimeChannel | null = null;
 const conversationChannels = new Map<string, RealtimeChannel>();
 const roomChannels = new Map<string, RealtimeChannel>();
 
@@ -71,6 +73,10 @@ function teardownChannels() {
     supabase.removeChannel(presenceChannel);
     presenceChannel = null;
   }
+  if (bootstrapChannel) {
+    supabase.removeChannel(bootstrapChannel);
+    bootstrapChannel = null;
+  }
   if (activeRoomPresenceChannel) {
     supabase.removeChannel(activeRoomPresenceChannel);
     activeRoomPresenceChannel = null;
@@ -80,6 +86,15 @@ function teardownChannels() {
   roomChannels.forEach((channel) => supabase.removeChannel(channel));
   conversationChannels.clear();
   roomChannels.clear();
+}
+
+async function loadConversationCache(conversationId: string) {
+  if (!currentSession || !currentHandlers) {
+    return;
+  }
+
+  const messages = await api.messages(currentSession, conversationId);
+  currentHandlers.onCache(messages);
 }
 
 function ensureConversationChannel(conversationId: string) {
@@ -104,7 +119,11 @@ function ensureConversationChannel(conversationId: string) {
     .on("broadcast", { event: "typing:clear" }, ({ payload }) =>
       currentHandlers?.onTyping(payload as TypingPayload, false),
     )
-    .subscribe();
+    .subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        void loadConversationCache(conversationId);
+      }
+    });
 
   conversationChannels.set(conversationId, channel);
 }
@@ -158,6 +177,28 @@ async function attachPresence(session: AuthSession, handlers: SocketHandlers) {
     });
 }
 
+async function attachBootstrapRefresh(session: AuthSession, handlers: SocketHandlers) {
+  bootstrapChannel = supabase
+    .channel(`frostchat:data:${session.user.id}`)
+    .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () =>
+      handlers.onBootstrapDataChanged(),
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "group_members",
+        filter: `user_id=eq.${session.user.id}`,
+      },
+      () => handlers.onBootstrapDataChanged(),
+    )
+    .on("postgres_changes", { event: "*", schema: "public", table: "groups" }, () =>
+      handlers.onBootstrapDataChanged(),
+    )
+    .subscribe();
+}
+
 export function getSocket() {
   return null;
 }
@@ -179,6 +220,7 @@ export function connectSocket(
     }
 
     await attachPresence(session, handlers);
+    await attachBootstrapRefresh(session, handlers);
     (options?.conversationIds ?? []).forEach(ensureConversationChannel);
     (options?.roomIds ?? []).forEach(ensureRoomChannel);
     handlers.onCache([]);
@@ -191,6 +233,9 @@ export function joinConversation(conversationId: string) {
 }
 
 export function emitMessage(payload: MessageRelayEvent) {
+  if (currentSession) {
+    void api.saveMessage(currentSession, payload);
+  }
   const prefix = payload.message.kind === "room" ? "room" : "conversation";
   const channel = payload.message.kind === "room"
     ? roomChannels.get(payload.message.conversationId)
@@ -232,6 +277,9 @@ export function emitStatus(payload: {
   userId: string;
   targetUserIds: string[];
 }) {
+  if (currentSession) {
+    void api.updateMessageStatus(currentSession, payload);
+  }
   const channel = conversationChannels.get(payload.conversationId);
   if (!channel) {
     return;
@@ -244,6 +292,9 @@ export function emitStatus(payload: {
 }
 
 export function emitReaction(payload: ReactionEvent) {
+  if (currentSession) {
+    void api.updateReaction(currentSession, payload);
+  }
   const channel = conversationChannels.get(payload.conversationId);
   if (!channel) {
     return;
@@ -256,6 +307,9 @@ export function emitReaction(payload: ReactionEvent) {
 }
 
 export function emitDelete(payload: DeleteEvent) {
+  if (currentSession) {
+    void api.updateDelete(currentSession, payload);
+  }
   const channel = conversationChannels.get(payload.conversationId);
   if (!channel) {
     return;

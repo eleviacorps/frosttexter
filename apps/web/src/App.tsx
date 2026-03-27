@@ -96,6 +96,7 @@ function FrostWorkspace() {
   );
 
   const sessionToken = session?.token;
+  const refreshBootstrap = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     if (!sessionToken || bootstrapTokenRef.current === sessionToken) {
@@ -132,6 +133,12 @@ function FrostWorkspace() {
         onConnect: () => setSocketConnected(true),
         onDisconnect: () => setSocketConnected(false),
         onPresence: (userIds) => setOnlineUsers(userIds),
+        onBootstrapDataChanged: () => {
+          window.clearTimeout(refreshBootstrap.current);
+          refreshBootstrap.current = window.setTimeout(() => {
+            void api.me(session.token, session.refreshToken).then(hydrate);
+          }, 120);
+        },
         onMessage: (message) => addMessage(message),
         onMessageStatus: ({ conversationId, messageId, status, userId }) =>
           updateMessageStatus({ conversationId, messageId, status, userId }),
@@ -196,6 +203,13 @@ function FrostWorkspace() {
     upsertRoom,
     upsertRoomParticipants,
   ]);
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(refreshBootstrap.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (activeConversationId) {

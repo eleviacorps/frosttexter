@@ -1,4 +1,12 @@
-import type { AuthSession, Conversation, LiveRoom, UploadConfig } from "@frostchat/shared";
+import type {
+  AuthSession,
+  ChatMessage,
+  Conversation,
+  DeleteEvent,
+  LiveRoom,
+  ReactionEvent,
+  UploadConfig,
+} from "@frostchat/shared";
 
 import { backend } from "./backend";
 
@@ -10,8 +18,26 @@ export const api = {
   me(token: string, refreshToken?: string) {
     return backend.me(token, refreshToken);
   },
+  messages(session: AuthSession, conversationId: string): Promise<ChatMessage[]> {
+    return backend.messages(session, conversationId);
+  },
   uploadConfig(token: string): Promise<UploadConfig> {
     return backend.uploadConfig(token);
+  },
+  saveMessage(session: AuthSession, payload: { message: ChatMessage; targetUserIds: string[] }) {
+    return backend.saveMessage(session, payload);
+  },
+  updateMessageStatus(
+    session: AuthSession,
+    payload: { conversationId: string; messageId: string; status: ChatMessage["status"]; userId: string },
+  ) {
+    return backend.updateMessageStatus(session, payload);
+  },
+  updateReaction(session: AuthSession, payload: ReactionEvent) {
+    return backend.updateReaction(session, payload);
+  },
+  updateDelete(session: AuthSession, payload: DeleteEvent) {
+    return backend.updateDelete(session, payload);
   },
   createGroup(
     session: AuthSession,

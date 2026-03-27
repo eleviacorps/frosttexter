@@ -11,6 +11,7 @@ async function main() {
   const migrations = [
     "supabase/migrations/20260326_frostchat_public.sql",
     "supabase/migrations/20260327_frostchat_invite_consumption.sql",
+    "supabase/migrations/20260327_frostchat_messages.sql",
   ];
 
   const sql = postgres(databaseUrl, { max: 1 });

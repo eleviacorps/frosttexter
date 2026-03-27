@@ -4,6 +4,9 @@ import type {
   Conversation,
   FrostUser,
   LiveRoom,
+  ChatMessage,
+  DeleteEvent,
+  ReactionEvent,
   UploadConfig,
 } from "@frostchat/shared";
 import { createEntityId } from "@frostchat/shared";
@@ -61,6 +64,30 @@ interface InviteCodeRow {
   uses?: number | null;
 }
 
+interface MessageRow {
+  id: string;
+  conversation_id: string;
+  kind: ChatMessage["kind"];
+  type: ChatMessage["type"];
+  sender_id: string;
+  participant_ids: string[];
+  body: string;
+  reply_to_id?: string | null;
+  attachments?: ChatMessage["attachments"] | null;
+  reactions?: ChatMessage["reactions"] | null;
+  status: ChatMessage["status"];
+  delivered_to?: string[] | null;
+  seen_by?: string[] | null;
+  mentions?: string[] | null;
+  hidden_for?: string[] | null;
+  is_secret?: boolean | null;
+  deleted_for_everyone?: boolean | null;
+  self_destruct_seconds?: number | null;
+  destruct_at?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
 function toUser(row: ProfileRow): FrostUser {
   return {
     id: row.id,
@@ -76,6 +103,34 @@ function toAuthSession(session: Session, profile: FrostUser): AuthSession {
     refreshToken: session.refresh_token,
     user: profile,
   };
+}
+
+function toMessage(row: MessageRow): ChatMessage {
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    kind: row.kind,
+    type: row.type,
+    senderId: row.sender_id,
+    body: row.body,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at ?? undefined,
+    replyToId: row.reply_to_id ?? undefined,
+    attachments: row.attachments ?? undefined,
+    reactions: row.reactions ?? undefined,
+    status: row.status,
+    deliveredTo: row.delivered_to ?? undefined,
+    seenBy: row.seen_by ?? undefined,
+    mentions: row.mentions ?? undefined,
+    isSecret: Boolean(row.is_secret),
+    deletedForEveryone: Boolean(row.deleted_for_everyone),
+    selfDestructSeconds: row.self_destruct_seconds ?? undefined,
+    destructAt: row.destruct_at ?? undefined,
+  };
+}
+
+function uniqueIds(ids: string[]) {
+  return Array.from(new Set(ids.filter(Boolean)));
 }
 
 function buildDmConversations(users: FrostUser[], currentUserId: string): Conversation[] {
@@ -157,6 +212,187 @@ async function fetchProfile(userId: string) {
   }
 
   return toUser(data);
+}
+
+async function fetchMessages(session: AuthSession, conversationId: string) {
+  const { data, error } = await supabase
+    .from("messages")
+    .select(
+      "id, conversation_id, kind, type, sender_id, participant_ids, body, reply_to_id, attachments, reactions, status, delivered_to, seen_by, mentions, hidden_for, is_secret, deleted_for_everyone, self_destruct_seconds, destruct_at, created_at, updated_at",
+    )
+    .eq("conversation_id", conversationId)
+    .not("hidden_for", "cs", `{${session.user.id}}`)
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((row) => toMessage(row as MessageRow));
+}
+
+async function persistMessage(message: ChatMessage, participantIds: string[]) {
+  const row = {
+    id: message.id,
+    conversation_id: message.conversationId,
+    kind: message.kind,
+    type: message.type,
+    sender_id: message.senderId,
+    participant_ids: uniqueIds(participantIds),
+    body: message.body,
+    reply_to_id: message.replyToId ?? null,
+    attachments: message.attachments ?? [],
+    reactions: message.reactions ?? [],
+    status: message.status,
+    delivered_to: message.deliveredTo ?? [],
+    seen_by: message.seenBy ?? [],
+    mentions: message.mentions ?? [],
+    is_secret: message.isSecret ?? false,
+    deleted_for_everyone: message.deletedForEveryone ?? false,
+    self_destruct_seconds: message.selfDestructSeconds ?? null,
+    destruct_at: message.destructAt ?? null,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase.from("messages").upsert(row, { onConflict: "id" });
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+async function updateStoredMessageStatus(payload: {
+  conversationId: string;
+  messageId: string;
+  status: ChatMessage["status"];
+  userId: string;
+}) {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, delivered_to, seen_by, status")
+    .eq("conversation_id", payload.conversationId)
+    .eq("id", payload.messageId)
+    .maybeSingle<Pick<MessageRow, "id" | "delivered_to" | "seen_by" | "status">>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!data) {
+    return;
+  }
+
+  const deliveredTo = uniqueIds([...(data.delivered_to ?? []), payload.userId]);
+  const seenBy =
+    payload.status === "seen"
+      ? uniqueIds([...(data.seen_by ?? []), payload.userId])
+      : data.seen_by ?? [];
+
+  const { error: updateError } = await supabase
+    .from("messages")
+    .update({
+      status: payload.status,
+      delivered_to: deliveredTo,
+      seen_by: seenBy,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", payload.messageId);
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+}
+
+async function updateStoredReaction(payload: ReactionEvent) {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, reactions")
+    .eq("conversation_id", payload.conversationId)
+    .eq("id", payload.messageId)
+    .maybeSingle<Pick<MessageRow, "id" | "reactions">>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!data) {
+    return;
+  }
+
+  const reactions = [...(data.reactions ?? [])];
+  const index = reactions.findIndex((reaction) => reaction.emoji === payload.emoji);
+
+  if (index === -1) {
+    reactions.push({ emoji: payload.emoji, userIds: [payload.userId] });
+  } else {
+    const current = reactions[index];
+    const nextUsers = current.userIds.includes(payload.userId)
+      ? current.userIds.filter((id) => id !== payload.userId)
+      : [...current.userIds, payload.userId];
+    if (nextUsers.length) {
+      reactions[index] = { ...current, userIds: nextUsers };
+    } else {
+      reactions.splice(index, 1);
+    }
+  }
+
+  const { error: updateError } = await supabase
+    .from("messages")
+    .update({
+      reactions,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", payload.messageId);
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+}
+
+async function updateStoredDelete(payload: DeleteEvent) {
+  if (payload.everyone) {
+    const { error } = await supabase
+      .from("messages")
+      .update({
+        body: "Message removed",
+        deleted_for_everyone: true,
+        status: "deleted",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", payload.messageId);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+    return;
+  }
+
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, hidden_for")
+    .eq("conversation_id", payload.conversationId)
+    .eq("id", payload.messageId)
+    .maybeSingle<Pick<MessageRow, "id" | "hidden_for">>();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!data) {
+    return;
+  }
+
+  const { error: updateError } = await supabase
+    .from("messages")
+    .update({
+      hidden_for: uniqueIds([...(data.hidden_for ?? []), payload.deletedBy]),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", payload.messageId);
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
 }
 
 export async function buildBootstrapFromSession(session: Session): Promise<BootstrapPayload> {
@@ -482,6 +718,24 @@ export const backend = {
     if (error) {
       throw new Error(error.message);
     }
+  },
+  async messages(session: AuthSession, conversationId: string) {
+    return fetchMessages(session, conversationId);
+  },
+  async saveMessage(_session: AuthSession, payload: { message: ChatMessage; targetUserIds: string[] }) {
+    await persistMessage(payload.message, [payload.message.senderId, ...payload.targetUserIds]);
+  },
+  async updateMessageStatus(
+    _session: AuthSession,
+    payload: { conversationId: string; messageId: string; status: ChatMessage["status"]; userId: string },
+  ) {
+    await updateStoredMessageStatus(payload);
+  },
+  async updateReaction(_session: AuthSession, payload: ReactionEvent) {
+    await updateStoredReaction(payload);
+  },
+  async updateDelete(_session: AuthSession, payload: DeleteEvent) {
+    await updateStoredDelete(payload);
   },
   async leaveRoom(session: AuthSession, roomId: string) {
     const { error } = await supabase

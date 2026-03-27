@@ -363,10 +363,15 @@ function DetailsPane({
                   {initials(user.username)}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm text-white/88">{user.username}</p>
-                  <p className="text-xs text-white/38">
-                    {user.id === session?.user.id ? "You" : "Member"}
-                  </p>
+                  <div className="flex items-center gap-2">
+                    <p className="truncate text-sm text-white/88">{user.username}</p>
+                    {conversation.adminIds?.includes(user.id) ? (
+                      <span className="rounded-full border border-[#d5f575]/18 bg-[#d5f575]/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-[#eef7c2]">
+                        Admin
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="text-xs text-white/38">{user.id === session?.user.id ? "You" : "Member"}</p>
                 </div>
               </div>
             ))}
