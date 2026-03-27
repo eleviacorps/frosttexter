@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "FrostChat",
+    "slug": "frostchat",
+    "scheme": "frostchat",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#070a16"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.frostchat.app"
+    }
+  }
+}
+
