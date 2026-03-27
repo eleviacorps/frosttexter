@@ -1,9 +1,11 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
+  Camera,
   LockKeyhole,
   LogOut,
   MessageSquareMore,
+  PencilLine,
   Plus,
   Search,
   Users,
@@ -14,6 +16,8 @@ import { useShallow } from "zustand/react/shallow";
 
 import { getConversationTitle } from "@frostchat/shared";
 
+import { api } from "@/lib/api";
+import { uploadAttachment } from "@/lib/media";
 import { useAppStore } from "@/store/useAppStore";
 
 function initials(name: string) {
@@ -25,9 +29,193 @@ function initials(name: string) {
     .toUpperCase();
 }
 
+function AvatarBadge({
+  name,
+  avatarUrl,
+  size = "md",
+}: {
+  name: string;
+  avatarUrl?: string;
+  size?: "sm" | "md";
+}) {
+  const classes = size === "sm" ? "h-10 w-10 rounded-2xl text-xs" : "h-12 w-12 rounded-2xl text-sm";
+
+  if (avatarUrl) {
+    return <img src={avatarUrl} alt={name} className={`${classes} object-cover`} />;
+  }
+
+  return (
+    <div className={`grid ${classes} place-items-center bg-[#191b1f] font-medium text-white/88`}>
+      {initials(name)}
+    </div>
+  );
+}
+
+function AccountDetailsDialog({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const session = useAppStore((state) => state.session);
+  const uploadConfig = useAppStore((state) => state.uploadConfig);
+  const hydrate = useAppStore((state) => state.hydrate);
+  const [username, setUsername] = useState(session?.user.username ?? "");
+  const [status, setStatus] = useState(session?.user.status ?? "");
+  const [avatarUrl, setAvatarUrl] = useState(session?.user.avatarUrl ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
+    setUsername(session.user.username);
+    setStatus(session.user.status ?? "");
+    setAvatarUrl(session.user.avatarUrl ?? "");
+    setError(undefined);
+  }, [open, session?.user.avatarUrl, session?.user.status, session?.user.username]);
+
+  if (!open || !session) {
+    return null;
+  }
+
+  async function handleAvatarUpload(file?: File) {
+    if (!file) {
+      return;
+    }
+
+    setSaving(true);
+    setError(undefined);
+    try {
+      const attachment = await uploadAttachment(file, file.name, uploadConfig ?? { bucket: "attachments" });
+      setAvatarUrl(attachment.url);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not upload avatar");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!session) {
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setError(undefined);
+      await api.updateProfile(session, {
+        username: username.trim(),
+        status: status.trim() || undefined,
+        avatarUrl: avatarUrl.trim() || undefined,
+      });
+      const bootstrap = await api.me(session.token, session.refreshToken);
+      hydrate(bootstrap);
+      onClose();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to update account");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="absolute inset-0 z-30 grid place-items-center bg-black/70 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-[28px] border border-[#182033] bg-[rgba(10,10,12,0.96)] p-6 shadow-[0_30px_80px_rgba(0,0,0,0.45)]">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[11px] uppercase tracking-[0.28em] text-white/32">Profile</p>
+            <h3 className="mt-2 text-2xl font-semibold tracking-tight text-white">Edit account details</h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-2xl border border-[#1a2336] bg-white/[0.04] px-4 py-2 text-sm text-white/72"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="mt-5 flex items-center gap-4 rounded-[24px] border border-[#1a2336] bg-[#111215] p-4">
+          <AvatarBadge name={username || session.user.username} avatarUrl={avatarUrl || undefined} />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-white">{username || session.user.username}</p>
+            <p className="mt-1 text-xs text-white/42">{status || "No status set yet"}</p>
+          </div>
+          <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-[#1a2336] bg-white/[0.04] px-3 py-2 text-xs text-white/78">
+            <Camera size={14} />
+            Upload
+            <input
+              type="file"
+              className="hidden"
+              accept="image/*"
+              onChange={(event) => void handleAvatarUpload(event.target.files?.[0])}
+            />
+          </label>
+        </div>
+
+        <div className="mt-5 space-y-4">
+          <label className="block text-sm text-white/70">
+            Username
+            <input
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              className="mt-2 w-full rounded-2xl border border-[#1a2336] bg-[#111215] px-4 py-3 text-white outline-none"
+            />
+          </label>
+
+          <label className="block text-sm text-white/70">
+            Status
+            <input
+              value={status}
+              onChange={(event) => setStatus(event.target.value)}
+              placeholder="Building something calm."
+              className="mt-2 w-full rounded-2xl border border-[#1a2336] bg-[#111215] px-4 py-3 text-white outline-none"
+            />
+          </label>
+
+          <label className="block text-sm text-white/70">
+            Avatar URL
+            <input
+              value={avatarUrl}
+              onChange={(event) => setAvatarUrl(event.target.value)}
+              placeholder="https://..."
+              className="mt-2 w-full rounded-2xl border border-[#1a2336] bg-[#111215] px-4 py-3 text-white outline-none"
+            />
+          </label>
+
+          {error ? <p className="text-sm text-rose-300">{error}</p> : null}
+        </div>
+
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-2xl border border-[#1a2336] bg-white/[0.04] px-4 py-3 text-sm text-white/72"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={saving || !username.trim()}
+            onClick={() => void handleSave()}
+            className="rounded-2xl bg-[#d5f575] px-4 py-3 text-sm font-medium text-black disabled:opacity-50"
+          >
+            {saving ? "Saving..." : "Save profile"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function Sidebar({ onCreateGroup }: { onCreateGroup: () => void }) {
   const location = useLocation();
   const navigate = useNavigate();
+  const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const {
     session,
     users,
@@ -129,6 +317,10 @@ export function Sidebar({ onCreateGroup }: { onCreateGroup: () => void }) {
             const title = getConversationTitle(conversation, users, session!.user.id);
             const dmOtherId = conversation.participantIds.find((id) => id !== session!.user.id);
             const isOnline = dmOtherId ? onlineUserIds.includes(dmOtherId) : false;
+            const avatarUser = conversation.kind === "dm"
+              ? users.find((user) => user.id === dmOtherId)
+              : undefined;
+            const avatarUrl = conversation.kind === "group" ? conversation.avatarUrl : avatarUser?.avatarUrl;
 
             return (
               <button
@@ -146,9 +338,7 @@ export function Sidebar({ onCreateGroup }: { onCreateGroup: () => void }) {
                 )}
               >
                 <div className="relative shrink-0">
-                  <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[#191b1f] text-sm font-medium text-white/88">
-                    {initials(title)}
-                  </div>
+                  <AvatarBadge name={title} avatarUrl={avatarUrl} />
                   {conversation.kind === "dm" ? (
                     <span
                       className={clsx(
@@ -177,17 +367,30 @@ export function Sidebar({ onCreateGroup }: { onCreateGroup: () => void }) {
           })}
         </div>
 
-        <div className="mt-4 flex items-center gap-3 rounded-[24px] border border-[#1a2336] bg-[#101114] px-3 py-3">
-          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[#191b1f] text-sm font-medium text-white">
-            {initials(session?.user.username ?? "Me")}
-          </div>
+        <button
+          type="button"
+          onClick={() => setAccountDialogOpen(true)}
+          className="mt-4 flex w-full items-center gap-3 rounded-[24px] border border-[#1a2336] bg-[#101114] px-3 py-3 text-left transition hover:border-[#24304b]"
+        >
+          <AvatarBadge
+            name={session?.user.username ?? "Me"}
+            avatarUrl={session?.user.avatarUrl}
+          />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium text-white">{session?.user.username}</p>
-            <p className="text-xs text-white/40">Invite-only account</p>
+            <p className="truncate text-xs text-white/40">
+              {session?.user.status || "Invite-only account"}
+            </p>
           </div>
+          <span className="inline-flex items-center gap-2 rounded-2xl border border-[#1a2336] bg-white/[0.03] px-3 py-2 text-xs text-white/72">
+            <PencilLine size={14} />
+            Edit
+          </span>
           <button
             type="button"
-            onClick={() => {
+            onClick={(event) => {
+              event.stopPropagation();
+              setAccountDialogOpen(false);
               logout();
               navigate("/login");
             }}
@@ -196,7 +399,9 @@ export function Sidebar({ onCreateGroup }: { onCreateGroup: () => void }) {
           >
             <LogOut size={16} />
           </button>
-        </div>
+        </button>
+
+        <AccountDetailsDialog open={accountDialogOpen} onClose={() => setAccountDialogOpen(false)} />
       </div>
     </div>
   );

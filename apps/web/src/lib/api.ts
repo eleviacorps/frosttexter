@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   Conversation,
   DeleteEvent,
+  FrostUser,
   LiveRoom,
   ReactionEvent,
   UploadConfig,
@@ -39,11 +40,30 @@ export const api = {
   updateDelete(session: AuthSession, payload: DeleteEvent) {
     return backend.updateDelete(session, payload);
   },
+  updateProfile(
+    session: AuthSession,
+    payload: { username: string; status?: string; avatarUrl?: string },
+  ): Promise<FrostUser> {
+    return backend.updateProfile(session, payload);
+  },
   createGroup(
     session: AuthSession,
     payload: { name: string; description?: string; memberIds: string[]; avatarUrl?: string },
   ): Promise<Conversation> {
     return backend.createGroup(session, payload);
+  },
+  updateGroup(
+    session: AuthSession,
+    groupId: string,
+    payload: { name: string; description?: string; avatarUrl?: string },
+  ): Promise<Conversation> {
+    return backend.updateGroup(session, groupId, payload);
+  },
+  addGroupMembers(session: AuthSession, groupId: string, memberIds: string[]): Promise<Conversation> {
+    return backend.addGroupMembers(session, groupId, memberIds);
+  },
+  removeGroupMember(session: AuthSession, groupId: string, memberId: string): Promise<Conversation> {
+    return backend.removeGroupMember(session, groupId, memberId);
   },
   createRoom(session: AuthSession, payload: { name: string; topic?: string }): Promise<LiveRoom> {
     return backend.createRoom(session, payload);

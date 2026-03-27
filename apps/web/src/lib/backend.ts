@@ -133,6 +133,19 @@ function uniqueIds(ids: string[]) {
   return Array.from(new Set(ids.filter(Boolean)));
 }
 
+function toConversation(group: GroupRow, members: GroupMemberRow[]): Conversation {
+  return {
+    id: group.id,
+    kind: "group" as const,
+    title: group.name,
+    participantIds: members.map((member) => member.user_id),
+    avatarUrl: group.avatar_url ?? undefined,
+    adminIds: [group.admin_id],
+    description: group.description ?? undefined,
+    updatedAt: group.updated_at,
+  };
+}
+
 function buildDmConversations(users: FrostUser[], currentUserId: string): Conversation[] {
   return users
     .filter((user) => user.id !== currentUserId)
@@ -230,6 +243,29 @@ async function fetchMessages(session: AuthSession, conversationId: string) {
   }
 
   return (data ?? []).map((row) => toMessage(row as MessageRow));
+}
+
+async function fetchGroupConversation(groupId: string) {
+  const [{ data: group, error: groupError }, { data: members, error: membersError }] = await Promise.all([
+    supabase
+      .from("groups")
+      .select("id, name, avatar_url, description, admin_id, updated_at")
+      .eq("id", groupId)
+      .single<GroupRow>(),
+    supabase
+      .from("group_members")
+      .select("group_id, user_id, muted, joined_at")
+      .eq("group_id", groupId),
+  ]);
+
+  if (groupError) {
+    throw new Error(groupError.message);
+  }
+  if (membersError) {
+    throw new Error(membersError.message);
+  }
+
+  return toConversation(group, (members ?? []) as GroupMemberRow[]);
 }
 
 async function persistMessage(message: ChatMessage, participantIds: string[]) {
@@ -464,18 +500,12 @@ export async function buildBootstrapFromSession(session: Session): Promise<Boots
   }
 
   const conversations: Conversation[] = [
-    ...((groupRows ?? []) as GroupRow[]).map((group) => ({
-      id: group.id,
-      kind: "group" as const,
-      title: group.name,
-      participantIds: ((allGroupMembers ?? []) as GroupMemberRow[])
-        .filter((member) => member.group_id === group.id)
-        .map((member) => member.user_id),
-      avatarUrl: group.avatar_url ?? undefined,
-      adminIds: [group.admin_id],
-      description: group.description ?? undefined,
-      updatedAt: group.updated_at,
-    })),
+    ...((groupRows ?? []) as GroupRow[]).map((group) =>
+      toConversation(
+        group,
+        ((allGroupMembers ?? []) as GroupMemberRow[]).filter((member) => member.group_id === group.id),
+      ),
+    ),
     ...buildDmConversations(users, currentUser.id),
   ];
 
@@ -625,16 +655,101 @@ export const backend = {
       throw new Error(membersError.message);
     }
 
-    return {
-      id,
-      kind: "group" as const,
-      title: payload.name,
-      participantIds: memberIds,
-      avatarUrl: payload.avatarUrl,
-      adminIds: [session.user.id],
-      description: payload.description,
-      updatedAt: now,
-    };
+    return fetchGroupConversation(id);
+  },
+  async updateProfile(
+    session: AuthSession,
+    payload: { username: string; status?: string; avatarUrl?: string },
+  ) {
+    const { data, error } = await supabase
+      .from("profiles")
+      .update({
+        username: payload.username,
+        status: payload.status ?? null,
+        avatar_url: payload.avatarUrl ?? null,
+      })
+      .eq("id", session.user.id)
+      .select("id, email, username, avatar_url, status, created_at")
+      .single<ProfileRow>();
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return toUser(data);
+  },
+  async updateGroup(
+    _session: AuthSession,
+    groupId: string,
+    payload: { name: string; description?: string; avatarUrl?: string },
+  ) {
+    const { error } = await supabase
+      .from("groups")
+      .update({
+        name: payload.name,
+        description: payload.description ?? null,
+        avatar_url: payload.avatarUrl ?? null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", groupId);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return fetchGroupConversation(groupId);
+  },
+  async addGroupMembers(_session: AuthSession, groupId: string, memberIds: string[]) {
+    const now = new Date().toISOString();
+    const uniqueMemberIds = uniqueIds(memberIds);
+
+    if (uniqueMemberIds.length) {
+      const { error } = await supabase.from("group_members").upsert(
+        uniqueMemberIds.map((memberId) => ({
+          group_id: groupId,
+          user_id: memberId,
+          joined_at: now,
+        })),
+        { onConflict: "group_id,user_id" },
+      );
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      const { error: touchError } = await supabase
+        .from("groups")
+        .update({ updated_at: now })
+        .eq("id", groupId);
+
+      if (touchError) {
+        throw new Error(touchError.message);
+      }
+    }
+
+    return fetchGroupConversation(groupId);
+  },
+  async removeGroupMember(_session: AuthSession, groupId: string, memberId: string) {
+    const { error } = await supabase
+      .from("group_members")
+      .delete()
+      .eq("group_id", groupId)
+      .eq("user_id", memberId);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    const { error: touchError } = await supabase
+      .from("groups")
+      .update({ updated_at: new Date().toISOString() })
+      .eq("id", groupId);
+
+    if (touchError) {
+      throw new Error(touchError.message);
+    }
+
+    return fetchGroupConversation(groupId);
   },
   async createRoom(session: AuthSession, payload: { name: string; topic?: string }) {
     const now = new Date().toISOString();

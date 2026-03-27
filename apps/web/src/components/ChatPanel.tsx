@@ -1,22 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
+  Camera,
   CheckCheck,
   Copy,
+  Crown,
   FileText,
   ImageIcon,
   LockKeyhole,
   MoreHorizontal,
   Phone,
+  Plus,
   Reply,
   Trash2,
   Users,
+  UserMinus,
   Video,
 } from "lucide-react";
 
-import type { ChatMessage, Conversation } from "@frostchat/shared";
+import type { ChatMessage, Conversation, FrostUser } from "@frostchat/shared";
 import { groupMessagesByDate } from "@frostchat/shared";
 
+import { api } from "@/lib/api";
+import { uploadAttachment } from "@/lib/media";
 import {
   emitMessage,
   emitReaction,
@@ -38,6 +44,26 @@ function initials(name: string) {
     .toUpperCase();
 }
 
+function AvatarBadge({
+  name,
+  avatarUrl,
+  className = "h-9 w-9 rounded-2xl text-[11px]",
+}: {
+  name: string;
+  avatarUrl?: string;
+  className?: string;
+}) {
+  if (avatarUrl) {
+    return <img src={avatarUrl} alt={name} className={`${className} object-cover`} />;
+  }
+
+  return (
+    <div className={`grid place-items-center bg-[#17191d] font-semibold text-white/72 ${className}`}>
+      {initials(name)}
+    </div>
+  );
+}
+
 function MessageBubble({ message, conversation }: { message: ChatMessage; conversation: Conversation }) {
   const session = useAppStore((state) => state.session)!;
   const users = useAppStore((state) => state.users);
@@ -48,11 +74,27 @@ function MessageBubble({ message, conversation }: { message: ChatMessage; conver
   const outgoing = message.senderId === session.user.id;
   const decryptedBody =
     conversation.kind === "secret" ? readSecretMessage(conversation.id, message.id) : message.body;
-  const sender = users.find((user) => user.id === message.senderId)?.username ?? "Friend";
+  const senderUser = users.find((user) => user.id === message.senderId);
+  const sender = senderUser?.username ?? "Friend";
+  const senderAvatarUrl = senderUser?.avatarUrl;
   const [menuOpen, setMenuOpen] = useState(false);
   const [customReaction, setCustomReaction] = useState("");
+  const [seenExpanded, setSeenExpanded] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const seenNames = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (message.seenBy ?? [])
+            .filter((userId) => userId !== message.senderId)
+            .map((userId) => users.find((user) => user.id === userId)?.username ?? "Someone"),
+        ),
+      ),
+    [message.seenBy, message.senderId, users],
+  );
+  const visibleSeenNames = seenExpanded ? seenNames : seenNames.slice(0, 2);
+  const hiddenSeenCount = Math.max(0, seenNames.length - visibleSeenNames.length);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -117,8 +159,8 @@ function MessageBubble({ message, conversation }: { message: ChatMessage; conver
       }}
     >
       {!outgoing ? (
-        <div className="hidden h-9 w-9 shrink-0 place-items-center rounded-2xl bg-[#17191d] text-[11px] font-semibold text-white/72 sm:grid">
-          {initials(sender)}
+        <div className="hidden shrink-0 sm:block">
+          <AvatarBadge name={sender} avatarUrl={senderAvatarUrl} />
         </div>
       ) : null}
 
@@ -306,9 +348,273 @@ function MessageBubble({ message, conversation }: { message: ChatMessage; conver
               {message.selfDestructSeconds ? <LockKeyhole size={12} className="text-amber-200/78" /> : null}
             </div>
           </div>
+
+          {outgoing && conversation.kind === "group" && seenNames.length ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-white/46">
+              <span>Seen by</span>
+              {visibleSeenNames.map((name) => (
+                <span
+                  key={`${message.id}-${name}`}
+                  className="rounded-full border border-[#1a2336] bg-black/18 px-2.5 py-1 text-white/74"
+                >
+                  {name}
+                </span>
+              ))}
+              {hiddenSeenCount ? (
+                <button
+                  type="button"
+                  onClick={() => setSeenExpanded(true)}
+                  className="rounded-full border border-[#24304b] bg-[#d5f575]/8 px-2.5 py-1 text-[#e6efb8]"
+                >
+                  +{hiddenSeenCount} more
+                </button>
+              ) : null}
+              {seenExpanded && seenNames.length > 2 ? (
+                <button
+                  type="button"
+                  onClick={() => setSeenExpanded(false)}
+                  className="text-white/56 transition hover:text-white"
+                >
+                  less
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
+  );
+}
+
+function GroupManagementCard({
+  conversation,
+  participants,
+}: {
+  conversation: Conversation;
+  participants: FrostUser[];
+}) {
+  const session = useAppStore((state) => state.session);
+  const users = useAppStore((state) => state.users);
+  const uploadConfig = useAppStore((state) => state.uploadConfig);
+  const upsertConversation = useAppStore((state) => state.upsertConversation);
+  const [name, setName] = useState(conversation.title);
+  const [description, setDescription] = useState(conversation.description ?? "");
+  const [avatarUrl, setAvatarUrl] = useState(conversation.avatarUrl ?? "");
+  const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
+  const [savingDetails, setSavingDetails] = useState(false);
+  const [savingMembers, setSavingMembers] = useState(false);
+  const [error, setError] = useState<string>();
+  const isAdmin = conversation.adminIds?.includes(session?.user.id ?? "") ?? false;
+
+  useEffect(() => {
+    setName(conversation.title);
+    setDescription(conversation.description ?? "");
+    setAvatarUrl(conversation.avatarUrl ?? "");
+    setSelectedMembers([]);
+    setError(undefined);
+  }, [conversation.avatarUrl, conversation.description, conversation.id, conversation.title]);
+
+  const availableUsers = users.filter(
+    (user) => user.id !== session?.user.id && !conversation.participantIds.includes(user.id),
+  );
+
+  async function handleAvatarUpload(file?: File) {
+    if (!file) {
+      return;
+    }
+
+    setSavingDetails(true);
+    setError(undefined);
+    try {
+      const attachment = await uploadAttachment(file, file.name, uploadConfig ?? { bucket: "attachments" });
+      setAvatarUrl(attachment.url);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not upload group avatar");
+    } finally {
+      setSavingDetails(false);
+    }
+  }
+
+  async function handleSaveDetails() {
+    if (!session || !name.trim()) {
+      return;
+    }
+
+    try {
+      setSavingDetails(true);
+      setError(undefined);
+      const nextConversation = await api.updateGroup(session, conversation.id, {
+        name: name.trim(),
+        description: description.trim() || undefined,
+        avatarUrl: avatarUrl.trim() || undefined,
+      });
+      upsertConversation(nextConversation);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to save group details");
+    } finally {
+      setSavingDetails(false);
+    }
+  }
+
+  async function handleAddMembers() {
+    if (!session || !selectedMembers.length) {
+      return;
+    }
+
+    try {
+      setSavingMembers(true);
+      setError(undefined);
+      const nextConversation = await api.addGroupMembers(session, conversation.id, selectedMembers);
+      upsertConversation(nextConversation);
+      setSelectedMembers([]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to add selected members");
+    } finally {
+      setSavingMembers(false);
+    }
+  }
+
+  if (!isAdmin) {
+    return (
+      <section className="rounded-[24px] border border-[#1a2336] bg-[#111215] p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <Crown size={15} className="text-[#dce9a6]" />
+          <p className="text-sm font-medium text-white">Group controls</p>
+        </div>
+        <p className="text-sm leading-6 text-white/46">
+          Only admins can rename the group, update its photo, or manage members right now.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-[24px] border border-[#1a2336] bg-[#111215] p-4">
+      <div className="mb-4 flex items-center gap-2">
+        <Crown size={15} className="text-[#dce9a6]" />
+        <p className="text-sm font-medium text-white">Group controls</p>
+      </div>
+
+      <div className="rounded-[22px] border border-[#1a2336] bg-[#0f1114] p-4">
+        <div className="flex items-center gap-3">
+          <AvatarBadge
+            name={name || conversation.title}
+            avatarUrl={avatarUrl || undefined}
+            className="h-12 w-12 rounded-2xl text-sm"
+          />
+          <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-[#1a2336] bg-white/[0.04] px-3 py-2 text-xs text-white/78">
+            <Camera size={14} />
+            Upload photo
+            <input
+              type="file"
+              className="hidden"
+              accept="image/*"
+              onChange={(event) => void handleAvatarUpload(event.target.files?.[0])}
+            />
+          </label>
+        </div>
+
+        <div className="mt-4 space-y-4">
+          <label className="block text-sm text-white/70">
+            Group name
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              className="mt-2 w-full rounded-2xl border border-[#1a2336] bg-[#111215] px-4 py-3 text-white outline-none"
+            />
+          </label>
+
+          <label className="block text-sm text-white/70">
+            Description
+            <textarea
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              rows={3}
+              className="mt-2 w-full rounded-2xl border border-[#1a2336] bg-[#111215] px-4 py-3 text-white outline-none"
+            />
+          </label>
+
+          <label className="block text-sm text-white/70">
+            Photo URL
+            <input
+              value={avatarUrl}
+              onChange={(event) => setAvatarUrl(event.target.value)}
+              placeholder="https://..."
+              className="mt-2 w-full rounded-2xl border border-[#1a2336] bg-[#111215] px-4 py-3 text-white outline-none"
+            />
+          </label>
+        </div>
+
+        <div className="mt-4 flex justify-end">
+          <button
+            type="button"
+            disabled={savingDetails || !name.trim()}
+            onClick={() => void handleSaveDetails()}
+            className="rounded-2xl bg-[#d5f575] px-4 py-3 text-sm font-medium text-black disabled:opacity-50"
+          >
+            {savingDetails ? "Saving..." : "Save group"}
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-[22px] border border-[#1a2336] bg-[#0f1114] p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-white">Add members</p>
+            <p className="mt-1 text-xs text-white/38">{participants.length} members in this group</p>
+          </div>
+          <button
+            type="button"
+            disabled={savingMembers || !selectedMembers.length}
+            onClick={() => void handleAddMembers()}
+            className="inline-flex items-center gap-2 rounded-2xl bg-[#d5f575] px-4 py-2.5 text-sm font-medium text-black disabled:opacity-50"
+          >
+            <Plus size={15} />
+            Add selected
+          </button>
+        </div>
+
+        {availableUsers.length ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {availableUsers.map((user) => {
+              const active = selectedMembers.includes(user.id);
+              return (
+                <button
+                  key={user.id}
+                  type="button"
+                  onClick={() =>
+                    setSelectedMembers((current) =>
+                      current.includes(user.id)
+                        ? current.filter((memberId) => memberId !== user.id)
+                        : [...current, user.id],
+                    )
+                  }
+                  className={clsx(
+                    "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs transition",
+                    active
+                      ? "border-[#d5f575]/30 bg-[#d5f575]/12 text-[#eff8bb]"
+                      : "border-[#1a2336] bg-white/[0.03] text-white/68 hover:border-[#24304b] hover:text-white",
+                  )}
+                >
+                  <AvatarBadge
+                    name={user.username}
+                    avatarUrl={user.avatarUrl}
+                    className="h-6 w-6 rounded-full text-[10px]"
+                  />
+                  {user.username}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="mt-4 text-sm leading-6 text-white/42">
+            Everyone in your network is already in this group.
+          </p>
+        )}
+
+        {error ? <p className="mt-4 text-sm text-rose-300">{error}</p> : null}
+      </div>
+    </section>
   );
 }
 
@@ -321,6 +627,10 @@ function DetailsPane({
 }) {
   const users = useAppStore((state) => state.users);
   const session = useAppStore((state) => state.session);
+  const upsertConversation = useAppStore((state) => state.upsertConversation);
+  const [removingMemberId, setRemovingMemberId] = useState<string>();
+  const [memberError, setMemberError] = useState<string>();
+  const isAdmin = conversation.adminIds?.includes(session?.user.id ?? "") ?? false;
 
   const participants = conversation.participantIds
     .map((id) => users.find((user) => user.id === id))
@@ -334,9 +644,11 @@ function DetailsPane({
     <aside className="flex h-full w-full flex-col">
       <div className="border-b border-[#182033] px-5 py-5">
         <div className="flex items-center gap-3">
-          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[#17191d] text-sm font-semibold text-white/82">
-            {initials(conversation.title)}
-          </div>
+          <AvatarBadge
+            name={conversation.title}
+            avatarUrl={conversation.avatarUrl}
+            className="h-12 w-12 rounded-2xl text-sm"
+          />
           <div className="min-w-0">
             <p className="truncate text-sm font-medium text-white">{conversation.title}</p>
             <p className="mt-1 text-xs text-white/38">
@@ -359,24 +671,61 @@ function DetailsPane({
           <div className="space-y-3">
             {participants.map((user) => (
               <div key={user.id} className="flex items-center gap-3">
-                <div className="grid h-10 w-10 place-items-center rounded-2xl bg-[#17191d] text-xs font-medium text-white/75">
-                  {initials(user.username)}
-                </div>
+                <AvatarBadge
+                  name={user.username}
+                  avatarUrl={user.avatarUrl}
+                  className="h-10 w-10 rounded-2xl text-xs"
+                />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <p className="truncate text-sm text-white/88">{user.username}</p>
                     {conversation.adminIds?.includes(user.id) ? (
-                      <span className="rounded-full border border-[#d5f575]/18 bg-[#d5f575]/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-[#eef7c2]">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-[#d5f575]/18 bg-[#d5f575]/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-[#eef7c2]">
+                        <Crown size={10} />
                         Admin
                       </span>
                     ) : null}
                   </div>
                   <p className="text-xs text-white/38">{user.id === session?.user.id ? "You" : "Member"}</p>
                 </div>
+                {conversation.kind === "group" &&
+                isAdmin &&
+                user.id !== session?.user.id &&
+                !conversation.adminIds?.includes(user.id) ? (
+                  <button
+                    type="button"
+                    disabled={removingMemberId === user.id}
+                    onClick={async () => {
+                      if (!session) {
+                        return;
+                      }
+
+                      try {
+                        setRemovingMemberId(user.id);
+                        setMemberError(undefined);
+                        const nextConversation = await api.removeGroupMember(session, conversation.id, user.id);
+                        upsertConversation(nextConversation);
+                      } catch (caught) {
+                        setMemberError(caught instanceof Error ? caught.message : "Unable to remove member");
+                      } finally {
+                        setRemovingMemberId(undefined);
+                      }
+                    }}
+                    className="inline-flex items-center gap-2 rounded-2xl border border-rose-300/18 bg-rose-500/8 px-3 py-2 text-xs text-rose-100/84 transition hover:bg-rose-500/12 disabled:opacity-50"
+                  >
+                    <UserMinus size={13} />
+                    {removingMemberId === user.id ? "Removing..." : "Remove"}
+                  </button>
+                ) : null}
               </div>
             ))}
           </div>
+          {memberError ? <p className="mt-4 text-sm text-rose-300">{memberError}</p> : null}
         </section>
+
+        {conversation.kind === "group" ? (
+          <GroupManagementCard conversation={conversation} participants={participants} />
+        ) : null}
 
         <section className="rounded-[24px] border border-[#1a2336] bg-[#111215] p-4">
           <div className="mb-4 flex items-center gap-2">
@@ -539,9 +888,11 @@ export function ChatPanel({ conversation }: { conversation?: Conversation }) {
         <header className="flex h-[84px] items-center justify-between border-b border-[#182033] px-4 sm:px-6">
           <div className="min-w-0">
             <div className="flex items-center gap-3">
-              <div className="grid h-11 w-11 place-items-center rounded-2xl bg-[#17191d] text-sm font-semibold text-white/82">
-                {initials(conversation.title)}
-              </div>
+              <AvatarBadge
+                name={conversation.title}
+                avatarUrl={conversation.avatarUrl}
+                className="h-11 w-11 rounded-2xl text-sm"
+              />
               <div className="min-w-0">
                 <p className="truncate text-lg font-semibold tracking-tight text-white">
                   {conversation.title}
